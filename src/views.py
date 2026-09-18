@@ -1,4 +1,5 @@
 import discord
+from src.embeds import create_stats_embed
 
 class StatsView(discord.ui.View):
     """Vista interactiva con botones para alternar entre secciones de estadísticas."""
@@ -8,10 +9,8 @@ class StatsView(discord.ui.View):
         self.player_bundle = player_bundle
         self.author_id = author_id
         self.current_page = "overview"
-        self.message = None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Solo el autor puede controlar los botones (pero cualquiera puede leer el embed)
         if interaction.user.id != self.author_id:
             await interaction.response.send_message("⏳ Solo quien invocó el comando puede usar estos botones.", ephemeral=True)
             return False
@@ -34,7 +33,6 @@ class StatsView(discord.ui.View):
 
     @discord.ui.button(label="Actualizar", emoji="🔄", style=discord.ButtonStyle.secondary)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
         await self._update(interaction, force_refresh=True)
 
     async def _update(self, interaction: discord.Interaction, force_refresh: bool = False):
@@ -45,6 +43,13 @@ class StatsView(discord.ui.View):
             self.player_bundle["input_type"],
             page=self.current_page
         )
-        await interaction.response.edit_message(embed=embed, view=self)
-        if force_refresh:
-            await interaction.followup.send("✅ Datos actualizados.", ephemeral=True)
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.message.edit(embed=embed, view=self)
+                
+            if force_refresh:
+                await interaction.followup.send("✅ Estadísticas actualizadas.", ephemeral=True)
+        except Exception as e:
+            print(f"Error al actualizar vista: {e}")
