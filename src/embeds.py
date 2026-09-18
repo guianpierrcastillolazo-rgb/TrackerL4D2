@@ -100,20 +100,35 @@ def create_stats_embed(steam_data: dict, cedapug_data: dict, l4d2center_data: di
         # Solo mostrar L4D2Center si el perfil realmente existe
         if has_center:
             center_url = l4d2center_data.get("url", "https://l4d2center.com/players/")
-            tier = l4d2center_data.get("rank_tier", "Jugador")
-            rating = l4d2center_data.get("rating", "1000")
-            matches = l4d2center_data.get("matches", 0)
-            center_lines = [f"**Tier:** `{tier}`", f"**MMR:** `{rating}`"]
-            if matches:
-                center_lines.append(f"**Partidas:** `{matches}` • **Winrate:** `{l4d2center_data.get('winrate', '0%')}`")
+            tier = l4d2center_data.get("rank_tier", "Sin rango")
+            rating = l4d2center_data.get("rating", "En calibración")
+            center_lines = [f"**Rango:** `{tier}`", f"**MMR:** `{rating}`"]
+            casual = l4d2center_data.get("casual_mmr", 0)
+            if casual:
+                center_lines.append(f"**MMR casual:** `{casual}`")
+            sub = l4d2center_data.get("subscription")
+            if sub:
+                center_lines.append(f"**Suscripción:** `{sub}`")
+            estado = []
+            if l4d2center_data.get("in_game"):
+                estado.append("En partida")
+            elif l4d2center_data.get("in_queue"):
+                estado.append("En cola")
+            elif l4d2center_data.get("online"):
+                estado.append("En línea")
+            if l4d2center_data.get("banned"):
+                estado.append("⛔ Baneado")
+            if estado:
+                center_lines.append(f"**Estado:** `{' • '.join(estado)}`")
             center_lines.append(f"[Ver en L4D2Center]({center_url})")
             embed.add_field(name="🏆 L4D2Center", value="\n".join(center_lines), inline=True)
         elif l4d2center_data.get("blocked"):
             embed.add_field(
                 name="🏆 L4D2Center",
-                value=f"*L4D2Center bloqueó la consulta automática (Cloudflare).*\n[Buscar `{steam64}` manualmente]({l4d2center_data.get('url', 'https://l4d2center.com/players/')})",
+                value=f"*L4D2Center bloqueó la consulta automática (Cloudflare).*\n[Buscar `{steam64}` manualmente](https://l4d2center.com/players/)",
                 inline=True
             )
+
             
         # Si no está en ninguno, mostrar aviso limpio
         if not has_ceda and not has_center:
