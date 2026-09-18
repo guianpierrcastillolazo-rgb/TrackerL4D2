@@ -11,56 +11,59 @@ def create_stats_embed(steam_data: dict, cedapug_data: dict, l4d2center_data: di
     
     color = discord.Color.red() if vac_banned else discord.Color.dark_theme()
     
+    has_ceda = cedapug_data.get("found", False)
+    has_center = l4d2center_data.get("found", False)
+    
     if page == "infected":
         embed = discord.Embed(
             title=f"🧟 Infectados — {name}",
             url=profile_url,
             color=discord.Color.purple()
         )
-        embed.description = (
-            "Estadísticas detalladas de Special Infected extraídas de CEDAPug y L4D2Center.\n"
-            "*(Algunas métricas requieren consulta directa en las plataformas).*"
-        )
-        ceda_url = cedapug_data.get("url", "https://cedapug.com")
-        center_url = l4d2center_data.get("url", "https://l4d2center.com")
+        embed.description = "Estadísticas y parámetros de juego competitivo (Config CedaMod/ZoneMod)."
         embed.add_field(
             name="☠️ Special Infected",
             value=(
-                f"**Smoker:** Tongue Range `750-825`\n"
-                f"**Hunter:** Godframes `1.2s`\n"
-                f"**Jockey:** Speed `275` / HP `350`\n"
-                f"**Boomer:** Horde `15-47`\n"
-                f"**Charger:** Godframes `1.8s`"
+                "**Smoker:** Tongue Range `750-825`\n"
+                "**Hunter:** Godframes `1.2s`\n"
+                "**Jockey:** Speed `275` / HP `350`\n"
+                "**Boomer:** Horde `15-47`\n"
+                "**Charger:** Godframes `1.8s`"
             ),
             inline=False
         )
-        embed.add_field(
-            name="🔗 Enlaces directos",
-            value=f"[CEDAPug]({ceda_url}) • [L4D2Center]({center_url})",
-            inline=False
-        )
+        links = []
+        if has_ceda:
+            links.append(f"[CEDAPug]({cedapug_data.get('url')})")
+        if has_center:
+            links.append(f"[L4D2Center]({l4d2center_data.get('url')})")
+        if links:
+            embed.add_field(name="🔗 Perfiles competitivos", value=" • ".join(links), inline=False)
+            
     elif page == "survivors":
         embed = discord.Embed(
             title=f"🏃 Supervivientes — {name}",
             url=profile_url,
             color=discord.Color.green()
         )
-        ceda_url = cedapug_data.get("url", "https://cedapug.com")
-        center_url = l4d2center_data.get("url", "https://l4d2center.com")
         embed.add_field(
-            name="🛡️ Rendimiento como Superviviente",
+            name="🛡️ Rendimiento Superviviente",
             value=(
-                f"**Horas totales L4D2:** `{l4d2_hours:,}`\n"
-                f"**Estado VAC:** {ban_badge}\n"
-                f"**Config:** CedaMod (basado en ZoneMod)"
+                f"**Horas totales:** `{l4d2_hours:,} hrs`\n"
+                f"**Estado:** {ban_badge}\n"
+                "**Armas:** Tier 1 & Tier 2 competitivas\n"
+                "**Config:** ZoneMod / CedaMod"
             ),
             inline=False
         )
-        embed.add_field(
-            name="🔗 Enlaces directos",
-            value=f"[CEDAPug]({ceda_url}) • [L4D2Center]({center_url})",
-            inline=False
-        )
+        links = []
+        if has_ceda:
+            links.append(f"[CEDAPug]({cedapug_data.get('url')})")
+        if has_center:
+            links.append(f"[L4D2Center]({l4d2center_data.get('url')})")
+        if links:
+            embed.add_field(name="🔗 Perfiles competitivos", value=" • ".join(links), inline=False)
+            
     else:  # overview
         embed = discord.Embed(
             title=f"📊 Estadísticas L4D2 — {name}",
@@ -69,8 +72,7 @@ def create_stats_embed(steam_data: dict, cedapug_data: dict, l4d2center_data: di
         )
         if avatar:
             embed.set_thumbnail(url=avatar)
-        ceda_url = cedapug_data.get("url", "https://cedapug.com")
-        center_url = l4d2center_data.get("url", "https://l4d2center.com")
+            
         embed.add_field(
             name="🎮 Steam Overview",
             value=(
@@ -81,16 +83,35 @@ def create_stats_embed(steam_data: dict, cedapug_data: dict, l4d2center_data: di
             ),
             inline=False
         )
-        embed.add_field(
-            name="⚔️ CEDAPug",
-            value=f"**Estado:** [Ver Perfil en CEDAPug]({ceda_url})",
-            inline=True
-        )
-        embed.add_field(
-            name="🏆 L4D2Center",
-            value=f"**Estado:** [Ver Perfil en Center]({center_url})",
-            inline=True
-        )
+        
+        # Solo mostrar CEDAPug si el perfil realmente existe
+        if has_ceda:
+            ceda_url = cedapug_data.get("url", "https://cedapug.com")
+            rating = cedapug_data.get("rating", "Activo")
+            embed.add_field(
+                name="⚔️ CEDAPug",
+                value=f"**Rating:** {rating}\n[Ver Perfil en CEDAPug]({ceda_url})",
+                inline=True
+            )
+            
+        # Solo mostrar L4D2Center si el perfil realmente existe
+        if has_center:
+            center_url = l4d2center_data.get("url", "https://l4d2center.com")
+            tier = l4d2center_data.get("rank_tier", "Jugador")
+            rating = l4d2center_data.get("rating", "1000")
+            embed.add_field(
+                name="🏆 L4D2Center",
+                value=f"**Tier:** `{tier}`\n**Rating:** `{rating}`\n[Ver Perfil en Center]({center_url})",
+                inline=True
+            )
+            
+        # Si no está en ninguno, mostrar aviso limpio
+        if not has_ceda and not has_center:
+            embed.add_field(
+                name="🎮 Perfil Competitivo",
+                value="*Sin perfil registrado en CEDAPug ni L4D2Center*",
+                inline=False
+            )
     
     embed.set_footer(text="L4D2 Stats Hub Bot • Búsqueda por SteamID, Vanity o URL")
     return embed
@@ -105,12 +126,18 @@ def create_compare_embed(p1: dict, p2: dict) -> discord.Embed:
         name = steam.get("persona_name", f"Jugador {i}")
         hours = steam.get("l4d2_hours", 0)
         ban = "🔴 VAC" if steam.get("vac_banned") else "🟢 Limpio"
+        links = [f"[Steam]({steam['profile_url']})"]
+        if player["ceda"].get("found"):
+            links.append(f"[CEDAPug]({player['ceda']['url']})")
+        if player["center"].get("found"):
+            links.append(f"[Center]({player['center']['url']})")
+            
         embed.add_field(
             name=f"👤 {name}",
             value=(
-                f"**Horas:** `{hours} hrs`\n"
-                f"**Estado:** {ban}\n"
-                f"[Steam]({steam['profile_url']}) • [CEDAPug]({player['ceda']['url']}) • [Center]({player['center']['url']})"
+                f"**Horas:** `{hours:,} hrs`\n"
+                f"**Estado:** {ban}\n" +
+                " • ".join(links)
             ),
             inline=True
         )
@@ -127,13 +154,13 @@ def create_leaderboard_embed(entries: list, metric: str) -> discord.Embed:
     embed = discord.Embed(title=title, color=discord.Color.gold())
     
     if not entries:
-        embed.description = "No hay jugadores registrados en la base de datos todavía. Usa `/stats` para empezar a rastrear."
+        embed.description = "No hay jugadores registrados todavía. Usa `/stats` o `!stats` para empezar."
     else:
         lines = []
         for idx, entry in enumerate(entries, 1):
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(idx, f"**{idx}.**")
-            value = entry.get("l4d2_hours", 0) if metric == "hours" else entry.get("center_rating", 1000) if metric == "rating" else entry.get("center_matches", 0)
-            lines.append(f"{medal} **{entry.get('persona_name', 'Desconocido')}** — `{value}` {metric_label}")
+            value = entry.get("hours", 0) if metric == "hours" else entry.get("center_rating", 1000) if metric == "rating" else entry.get("center_matches", 0)
+            lines.append(f"{medal} **{entry.get('name', 'Desconocido')}** — `{value:,}` {metric_label}")
         embed.description = "\n".join(lines)
     
     embed.set_footer(text="L4D2 Stats Hub Bot • Leaderboard del servidor")
