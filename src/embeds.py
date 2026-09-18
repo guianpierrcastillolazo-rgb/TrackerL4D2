@@ -88,20 +88,30 @@ def create_stats_embed(steam_data: dict, cedapug_data: dict, l4d2center_data: di
         if has_ceda:
             ceda_url = cedapug_data.get("url", "https://cedapug.com")
             rating = cedapug_data.get("rating", "Activo")
-            embed.add_field(
-                name="⚔️ CEDAPug",
-                value=f"**Rating:** {rating}\n[Ver Perfil en CEDAPug]({ceda_url})",
-                inline=True
-            )
+            tier = cedapug_data.get("tier", "Sin rango")
+            trust = cedapug_data.get("trust_factor", "N/A")
+            rounds = cedapug_data.get("rounds", 0)
+            ceda_lines = [f"**Rating:** `{rating}`", f"**Tier:** `{tier}`", f"**Trust Factor:** `{trust}`"]
+            if rounds:
+                ceda_lines.append(f"**Rondas:** `{rounds}`")
+            ceda_lines.append(f"[Stats]({ceda_url}) • [Ratings]({cedapug_data.get('ratings_url', 'https://cedapug.com/ratings')})")
+            embed.add_field(name="⚔️ CEDAPug", value="\n".join(ceda_lines), inline=True)
             
         # Solo mostrar L4D2Center si el perfil realmente existe
         if has_center:
-            center_url = l4d2center_data.get("url", "https://l4d2center.com")
+            center_url = l4d2center_data.get("url", "https://l4d2center.com/players/")
             tier = l4d2center_data.get("rank_tier", "Jugador")
             rating = l4d2center_data.get("rating", "1000")
+            matches = l4d2center_data.get("matches", 0)
+            center_lines = [f"**Tier:** `{tier}`", f"**MMR:** `{rating}`"]
+            if matches:
+                center_lines.append(f"**Partidas:** `{matches}` • **Winrate:** `{l4d2center_data.get('winrate', '0%')}`")
+            center_lines.append(f"[Ver en L4D2Center]({center_url})")
+            embed.add_field(name="🏆 L4D2Center", value="\n".join(center_lines), inline=True)
+        elif l4d2center_data.get("blocked"):
             embed.add_field(
                 name="🏆 L4D2Center",
-                value=f"**Tier:** `{tier}`\n**Rating:** `{rating}`\n[Ver Perfil en Center]({center_url})",
+                value=f"*L4D2Center bloqueó la consulta automática (Cloudflare).*\n[Buscar `{steam64}` manualmente]({l4d2center_data.get('url', 'https://l4d2center.com/players/')})",
                 inline=True
             )
             
