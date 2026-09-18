@@ -1,150 +1,246 @@
 import os
-import re
-import json
+import struct
 import aiohttp
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
+
+# ---------------------------------------------------------------------------
+# Decodificador protobuf minimalista (sin dependencias extra).
+# L4D2Center expone su API en https://api.l4d2center.com/v2/getplayers y
+# responde con un mensaje protobuf "PlayerList" (ver /players/script.js del sitio).
+# ---------------------------------------------------------------------------
+
+def _read_varint(buf: bytes, i: int) -> Tuple[int, int]:
+    result = 0
+    shift = 0
+    while i < len(buf):
+        b = buf[i]
+        i += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, i
+        shift += 7
+    raise ValueError("varint truncado")
+
+
+def _parse_message(buf: bytes) -> Dict[int, List[Any]]:
+    """Devuelve {numero_de_campo: [valores...]} con valores crudos."""
+    out: Dict[int, List[Any]] = {}
+    i = 0
+    while i < len(buf):
+        key, i = _read_varint(buf, i)
+        field, wire = key >> 3, key & 0x07
+        if wire == 0:
+            val, i = _read_varint(buf, i)
+        elif wire == 1:
+            val = buf[i:i + 8]
+            i += 8
+        elif wire == 2:
+            length, i = _read_varint(buf, i)
+            val = buf[i:i + length]
+            i += length
+        elif wire == 5:
+            val = buf[i:i + 4]
+            i += 4
+        else:
+            raise ValueError(f"wire type no soportado: {wire}")
+        out.setdefault(field, []).append(val)
+    return out
+
+
+def _as_int(values: Optional[List[Any]], default: int = 0) -> int:
+    if not values:
+        return default
+    v = values[-1]
+    if isinstance(v, int):
+        # zig-zag no se usa aquí (int32/int64 normales)
+        if v >= (1 << 63):
+            v -= (1 << 64)
+        return v
+    return default
+
+
+def _as_bool(values: Optional[List[Any]]) -> bool:
+    return bool(_as_int(values, 0))
+
+
+def _as_str(values: Optional[List[Any]], default: str = "") -> str:
+    if not values:
+        return default
+    v = values[-1]
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            return v.decode("utf-8", errors="replace")
+        except Exception:
+            return default
+    return default
+
+
+def _as_float(values: Optional[List[Any]], default: float = 0.0) -> float:
+    if not values:
+        return default
+    v = values[-1]
+    if isinstance(v, (bytes, bytearray)) and len(v) == 4:
+        return struct.unpack("<f", bytes(v))[0]
+    if isinstance(v, (bytes, bytearray)) and len(v) == 8:
+        return struct.unpack("<d", bytes(v))[0]
+    return default
+
 
 class L4D2CenterTracker:
-    """Busca el SteamID64 de un jugador en L4D2Center (https://l4d2center.com/players).
+    """Consulta el SteamID64 en la API real de L4D2Center.
 
-    Nota: la sección /players de L4D2Center está protegida por un desafío de Cloudflare
-    ("Just a moment..."), que bloquea peticiones automáticas. El tracker:
-      1. Intenta la URL configurada en L4D2CENTER_API_URL (opcional, ver README) con {steam64}.
-      2. Intenta la página pública /players/?steamid=... y varias rutas JSON conocidas.
-      3. Si Cloudflare responde con desafío, marca `blocked=True` y devuelve el enlace de búsqueda
-         para que el usuario lo abra manualmente desde Discord.
+    Endpoint usado por la propia web (l4d2center.com/players):
+        GET https://api.l4d2center.com/v2/getplayers?type=all&low=0&high=9&search=<steamid_o_nick>
+    Respuesta: protobuf PlayerList (Success, List[PlayerInfo], TotalPlayers, ...).
+
+    Campos de PlayerInfo que leemos:
+        2 SteamID64 (string), 3 AvatarSmall, 4 AvatarBig, 5 Nickname,
+        6 Mmr (int32), 7 MmrUncertainty (float), 12 ProfValidated, 13 RulesAccepted,
+        15 IsOnline, 17 IsInGame, 18 IsInQueue, 19 MmrGrade (int32),
+        43 BanID, 45 Subscription, 54 CasualMmr, 56 CasualMmrGrade.
     """
+
     BASE_URL = "https://l4d2center.com"
     PLAYERS_URL = f"{BASE_URL}/players/"
+    API_URL = os.getenv("L4D2CENTER_API_URL", "https://api.l4d2center.com/v2/getplayers")
     HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
-        "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": BASE_URL,
         "Referer": PLAYERS_URL,
     }
 
+    SUB_NAMES = {0: "", 1: "Basic", 2: "Premium"}
+
     @staticmethod
-    def _is_cf_challenge(status: int, text: str) -> bool:
-        return status in (403, 503) and ("Just a moment" in text or "cf-chl" in text or "challenge-platform" in text)
+    def _is_cf_challenge(status: int, body: bytes) -> bool:
+        if status not in (403, 503):
+            return False
+        head = body[:4000].lower()
+        return b"just a moment" in head or b"cf-chl" in head or b"challenge-platform" in head
 
     @classmethod
-    def _candidate_urls(cls, steam64: str):
-        custom = os.getenv("L4D2CENTER_API_URL")
-        if custom:
-            yield custom.replace("{steam64}", steam64)
-        yield f"{cls.PLAYERS_URL}?steamid={steam64}"
-        yield f"{cls.PLAYERS_URL}?search={steam64}"
-        yield f"{cls.PLAYERS_URL}{steam64}"
-        yield f"{cls.BASE_URL}/api/players/{steam64}"
-        yield f"{cls.BASE_URL}/api/player/{steam64}"
+    def _grade_name(cls, grade: int) -> str:
+        if grade <= 0:
+            return "Sin rango"
+        return f"Grado {grade}"
 
-    @staticmethod
-    def _parse_json(data: Any, steam64: str) -> Optional[dict]:
-        """Extrae un jugador de una respuesta JSON con forma desconocida."""
-        candidates = []
-        if isinstance(data, dict):
-            for key in ("data", "players", "results", "items", "player", "profile"):
-                if key in data:
-                    candidates.append(data[key])
-            candidates.append(data)
-        elif isinstance(data, list):
-            candidates.append(data)
+    @classmethod
+    def _parse_player(cls, raw: bytes) -> Dict[str, Any]:
+        f = _parse_message(raw)
+        sub_type = 0
+        sub_msg = f.get(45)
+        if sub_msg and isinstance(sub_msg[-1], (bytes, bytearray)):
+            try:
+                sub_type = _as_int(_parse_message(bytes(sub_msg[-1])).get(1), 0)
+            except Exception:
+                sub_type = 0
+        return {
+            "steam64": _as_str(f.get(2)),
+            "avatar_small": _as_str(f.get(3)),
+            "avatar_big": _as_str(f.get(4)),
+            "nickname": _as_str(f.get(5)),
+            "mmr": _as_int(f.get(6)),
+            "mmr_uncertainty": _as_float(f.get(7)),
+            "validated": _as_bool(f.get(12)),
+            "rules_accepted": _as_bool(f.get(13)),
+            "online": _as_bool(f.get(15)),
+            "in_game": _as_bool(f.get(17)),
+            "in_queue": _as_bool(f.get(18)),
+            "mmr_grade": _as_int(f.get(19)),
+            "ban_id": _as_int(f.get(43)),
+            "subscription": sub_type,
+            "casual_mmr": _as_int(f.get(54)),
+            "casual_grade": _as_int(f.get(56)),
+        }
 
-        for c in candidates:
-            rows = c if isinstance(c, list) else [c]
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                sid = str(row.get("steamid") or row.get("steamId") or row.get("steam64") or row.get("steamid64") or "")
-                if sid == steam64:
-                    return row
-        return None
-
-    @staticmethod
-    def _parse_html(html: str, steam64: str) -> Optional[dict]:
-        """Busca la fila del jugador en el HTML de /players."""
-        if steam64 not in html:
+    @classmethod
+    def _parse_playerlist(cls, raw: bytes, steam64: str) -> Optional[Dict[str, Any]]:
+        msg = _parse_message(raw)
+        if not _as_bool(msg.get(1)):
             return None
-        # Intentar localizar la fila <tr> que contiene el SteamID
-        row_match = re.search(r"<tr[^>]*>(?:(?!</tr>).)*" + re.escape(steam64) + r"(?:(?!</tr>).)*</tr>", html, re.S | re.I)
-        chunk = row_match.group(0) if row_match else html[max(0, html.find(steam64) - 1500): html.find(steam64) + 1500]
-        text = re.sub(r"<[^>]+>", " ", chunk)
-        text = re.sub(r"\s+", " ", text).strip()
-
-        result: Dict[str, Any] = {"raw": text}
-        m = re.search(r"(?:mmr|rating)\D{0,20}(\d{3,5})", text, re.I)
-        if m:
-            result["mmr"] = int(m.group(1))
-        m = re.search(r"(?:games|matches|partidas)\D{0,20}(\d+)", text, re.I)
-        if m:
-            result["matches"] = int(m.group(1))
-        m = re.search(r"(?:win\s*rate|winrate)\D{0,10}(\d{1,3})\s*%", text, re.I)
-        if m:
-            result["winrate"] = f"{m.group(1)}%"
-        m = re.search(r"(?:rank|tier|rango)\D{0,10}([A-Za-z]+(?:\s?[IVX0-9]+)?)", text, re.I)
-        if m:
-            result["rank"] = m.group(1)
-        return result
+        for entry in msg.get(5, []):
+            if not isinstance(entry, (bytes, bytearray)):
+                continue
+            try:
+                player = cls._parse_player(bytes(entry))
+            except Exception:
+                continue
+            if player.get("steam64") == steam64:
+                return player
+        return None
 
     @classmethod
     async def get_player_stats(cls, session: aiohttp.ClientSession, steam64: str) -> Dict[str, Any]:
         stats: Dict[str, Any] = {
             "found": False,
             "blocked": False,
-            "url": f"{cls.PLAYERS_URL}?steamid={steam64}",
-            "rank_tier": "Unranked",
-            "rating": "1000",
+            "url": f"{cls.PLAYERS_URL}",
+            "profile_url": f"{cls.BASE_URL}/profile/?steam_id={steam64}",
+            "rank_tier": "Sin rango",
+            "rating": "0",
+            "mmr": 0,
+            "mmr_grade": 0,
+            "casual_mmr": 0,
+            "casual_grade": 0,
             "matches": 0,
-            "winrate": "0%",
+            "winrate": "N/A",
             "damage_per_round": "N/A",
             "mvp": 0,
+            "name": "",
+            "avatar": "",
+            "online": False,
+            "in_game": False,
+            "in_queue": False,
+            "validated": False,
+            "banned": False,
+            "subscription": "",
         }
 
-        for url in cls._candidate_urls(steam64):
-            try:
-                async with session.get(url, headers=cls.HEADERS, timeout=8, allow_redirects=True) as resp:
-                    status = resp.status
-                    ctype = resp.headers.get("Content-Type", "")
-                    text = await resp.text(errors="ignore")
-            except Exception as e:
-                print(f"Error consultando L4D2Center ({url}): {e}")
-                continue
+        params = {"type": "all", "low": 0, "high": 9, "search": steam64}
+        try:
+            async with session.get(cls.API_URL, params=params, headers=cls.HEADERS, timeout=10) as resp:
+                status = resp.status
+                body = await resp.read()
+        except Exception as e:
+            print(f"Error consultando L4D2Center: {e}")
+            return stats
 
-            if cls._is_cf_challenge(status, text):
+        if cls._is_cf_challenge(status, body):
+            stats["blocked"] = True
+            return stats
+        if status != 200 or not body:
+            if status in (403, 503):
                 stats["blocked"] = True
-                continue
-            if status != 200:
-                continue
+            return stats
 
-            row = None
-            if "json" in ctype or text.lstrip().startswith(("{", "[")):
-                try:
-                    row = cls._parse_json(json.loads(text), steam64)
-                except Exception:
-                    row = None
-            else:
-                row = cls._parse_html(text, steam64)
+        try:
+            player = cls._parse_playerlist(body, steam64)
+        except Exception as e:
+            print(f"Error decodificando respuesta de L4D2Center: {e}")
+            return stats
 
-            if row:
-                stats["found"] = True
-                stats["url"] = url if "api/" not in url else stats["url"]
-                mmr = row.get("mmr") or row.get("rating") or row.get("elo")
-                if mmr is not None:
-                    stats["rating"] = str(mmr)
-                matches = row.get("matches") or row.get("games") or row.get("games_played")
-                if matches is not None:
-                    stats["matches"] = int(matches)
-                if row.get("winrate"):
-                    stats["winrate"] = str(row["winrate"])
-                rank = row.get("rank") or row.get("tier") or row.get("rank_tier")
-                if rank:
-                    stats["rank_tier"] = str(rank)
-                elif stats["matches"] >= 11:
-                    stats["rank_tier"] = "Ranked"
-                else:
-                    stats["rank_tier"] = "Placement"
-                if row.get("mvp") is not None:
-                    stats["mvp"] = int(row["mvp"])
-                break
+        if not player:
+            return stats
 
+        stats.update({
+            "found": True,
+            "url": stats["profile_url"],
+            "name": player["nickname"],
+            "avatar": player["avatar_big"] or player["avatar_small"],
+            "mmr": player["mmr"],
+            "mmr_grade": player["mmr_grade"],
+            "rating": str(player["mmr"]) if player["mmr_grade"] > 0 else "En calibración",
+            "rank_tier": cls._grade_name(player["mmr_grade"]),
+            "casual_mmr": player["casual_mmr"],
+            "casual_grade": player["casual_grade"],
+            "online": player["online"],
+            "in_game": player["in_game"],
+            "in_queue": player["in_queue"],
+            "validated": player["validated"],
+            "banned": player["ban_id"] > 0,
+            "subscription": cls.SUB_NAMES.get(player["subscription"], ""),
+        })
         return stats
