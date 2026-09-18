@@ -22,6 +22,7 @@ GUILD_ID = os.getenv("GUILD_ID")
 PORT = os.getenv("PORT", "8080")
 
 intents = discord.Intents.default()
+intents.message_content = True
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -326,6 +327,117 @@ async def help_cmd(interaction: discord.Interaction):
 )
 async def ayuda_cmd(interaction: discord.Interaction):
     await help_cmd(interaction)
+
+
+def get_help_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="🎮 Bot Tracker de L4D2 — Comandos y Uso",
+        description="Rastrea perfiles y estadísticas en **Steam**, **CEDAPug** y **L4D2Center**.\nFunciona con prefijo `!` y con comandos de barra `/`.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(
+        name="📋 Comandos disponibles",
+        value=(
+            "`!stats <id/url>` o `/stats` — Consulta Steam, CEDAPug y L4D2Center\n"
+            "`!me` o `/me` — Muestra tus estadísticas vinculadas\n"
+            "`!link <id/url>` o `/link` — Vincula tu Steam a tu Discord\n"
+            "`!compare <p1> <p2>` o `/compare` — Comparativa directa\n"
+            "`!leaderboard` o `/leaderboard` — Ranking del servidor\n"
+            "`!ayuda` o `!help` o `/ayuda` — Muestra este menú"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🔍 Formatos aceptados",
+        value=(
+            "• **Mención:** `@usuario` (debe haber usado `!link`)\n"
+            "• **SteamID clásico:** `STEAM_0:0:12345678`\n"
+            "• **SteamID3:** `[U:1:24691356]` o `U:1:24691356`\n"
+            "• **SteamID64:** `76561198000000000`\n"
+            "• **Vanity:** `mi_usuario`\n"
+            "• **URL:** `https://steamcommunity.com/id/mi_usuario/`"
+        ),
+        inline=False
+    )
+    return embed
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    content_lower = message.content.strip().lower()
+
+    if content_lower in ["!help", "!ayuda", "!comandos"]:
+        await message.channel.send(embed=get_help_embed())
+        return
+
+    if content_lower == "!me":
+        steam64 = get_linked_steam64(message.author.id)
+        if not steam64:
+            await message.reply("❌ No tienes cuenta de Steam vinculada. Usa `!link <steam_id>` primero.")
+            return
+        async with aiohttp.ClientSession() as session:
+            s_data, i_type, c_data, cnt_data, _ = await resolve_all_player_stats(session, steam64)
+            if not s_data:
+                await message.reply("❌ No se pudo recuperar tu perfil vinculado.")
+                return
+            emb = create_stats_embed(s_data, c_data, cnt_data, "vinculado")
+            v = StatsView(
+                player_bundle={"steam": s_data, "ceda": c_data, "center": cnt_data, "input_type": "vinculado"},
+                author_id=message.author.id
+            )
+            await message.channel.send(embed=emb, view=v)
+        return
+
+    if content_lower.startswith("!link "):
+        query = message.content[6:].strip()
+        if not STEAM_API_KEY:
+            await message.reply("⚠️ STEAM_API_KEY no configurada.")
+            return
+        async with aiohttp.ClientSession() as session:
+            steam64, input_type = await SteamResolver.resolve_to_steam64(session, STEAM_API_KEY, query)
+            if not steam64:
+                await message.reply(f"❌ No se pudo resolver `{query}` a un perfil válido.")
+                return
+            link_discord_user(message.author.id, steam64)
+            await message.reply(f"✅ Vinculado a SteamID `{steam64}` ({input_type}).")
+        return
+
+    if content_lower.startswith("!stats"):
+        query = message.content[6:].strip()
+        if not query:
+            linked = get_linked_steam64(message.author.id)
+            if not linked:
+                await message.reply("❌ Especifica una búsqueda: `!stats <steamid/url/@usuario>` o usa `!link`.")
+                return
+            query = linked
+
+        m_match = re.match(r"^<@!?(\d+)>$", query)
+        if m_match:
+            linked_m = get_linked_steam64(m_match.group(1))
+            if not linked_m:
+                await message.reply("❌ El usuario mencionado no tiene cuenta vinculada.")
+                return
+            query = linked_m
+
+        async with aiohttp.ClientSession() as session:
+            s_data, i_type, c_data, cnt_data, _ = await resolve_all_player_stats(session, query)
+            if not s_data:
+                await message.reply(f"❌ No se encontró ningún perfil con `{query}`.")
+                return
+            emb = create_stats_embed(s_data, c_data, cnt_data, i_type)
+            v = StatsView(
+                player_bundle={"steam": s_data, "ceda": c_data, "center": cnt_data, "input_type": i_type},
+                author_id=message.author.id
+            )
+            await message.channel.send(embed=emb, view=v)
+        return
+
+    if content_lower.startswith("!leaderboard") or content_lower.startswith("!top"):
+        entries = get_leaderboard(metric="hours", limit=10)
+        await message.channel.send(embed=create_leaderboard_embed(entries, "hours"))
+        return
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
