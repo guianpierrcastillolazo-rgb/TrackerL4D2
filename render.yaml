@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: l4d2-discord-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    autoDeploy: true
